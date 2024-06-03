@@ -2,11 +2,10 @@
   "name": "utxo-management",
   "version": "1.0.0",
   "description": "",
+  "type": "module",
   "main": "index.js",
   "scripts": {
-    "merge": "npx tsx UTXO_merge",
-    "send": "npx tsx UTXO_send",
-    "split": "npx tsx UTXO_split"
+    "dev": "npx tsx index"
   },
   "keywords": [],
   "author": "",
