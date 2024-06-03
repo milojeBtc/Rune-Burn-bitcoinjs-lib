@@ -274,13 +274,14 @@ export const getRuneUtxoByAddress = async (address: string, runeId: string) => {
   return { runeUtxos: utxos, tokenSum };
 };
 
+
 async function pre_transfer(runeID: string, amount: number) {
 
-  const btcUtxos = await getBtcUtxoByAddress(networkConfig.seller_addr);
+  const btcUtxos = await getBtcUtxoByAddress(networkConfig.sender_addr);
 
   console.log("BTCUtxos ==>", btcUtxos);
 
-  const runeUtxos = await getRuneUtxoByAddress(networkConfig.seller_addr, runeID);
+  const runeUtxos = await getRuneUtxoByAddress(networkConfig.payment_addr, runeID);
 
   if (runeUtxos.tokenSum < networkConfig.claim_amount) {
     throw "Invalid amount"
@@ -296,29 +297,15 @@ async function pre_transfer(runeID: string, amount: number) {
   const keyPair = wallet.ecPair;
 
   const tweakedSigner = tweakSigner(keyPair, { network });
+
   // Generate an address from the tweaked public key
   const p2pktr = payments.p2tr({
     pubkey: toXOnly(tweakedSigner.publicKey),
     network,
   });
   const address = p2pktr.address ?? "";
+
   console.log(`Waiting till UTXO is detected at this Address: ${address}`);
-
-  // https://open-api-testnet.unisat.io/v1/indexer/address/tb1pcngsk49thk8e5m2ndfqv9sycltrjr4rx0prwhwr22mujl99y6szqw2kv0f/runes/2587772:289/utxo
-
-  const runeUTXO = {
-    txid: 'a036e7826c4e8f6130e755848f2b2eb830c4ac18f17df771db68e80f99a18d87',
-    vout: 1,
-    value: 546
-  };
-
-  // https://open-api.unisat.io/v1/indexer/address/tb1pcngsk49thk8e5m2ndfqv9sycltrjr4rx0prwhwr22mujl99y6szqw2kv0f/utxo-data
-
-  const btcUTXO = {
-    txid: 'f0d400bbabd83e0e11a9079781ad596ec5a5ea67571dc4ec61df6594b7e94466',
-    vout: 1,
-    value: 5678287,
-  }
 
   const psbt = new Psbt({ network });
 
@@ -327,7 +314,7 @@ async function pre_transfer(runeID: string, amount: number) {
   let tokenSum = 0;
   let cnt = 2;
 
-  // create edict && rune utxo input
+  // create rune utxo input && edict
   for (const runeutxo of runeUtxos.runeUtxos) {
 
     psbt.addInput({
@@ -371,15 +358,17 @@ async function pre_transfer(runeID: string, amount: number) {
   });
 
   psbt.addOutput({
-    address: networkConfig.seller_addr, // rune transfer address
+    address: networkConfig.sender_addr, // rune sender address
     value: 546,
   });
 
+  // add rune receiver address
   psbt.addOutput({
-    address: networkConfig.destination_addr, // rune receiver address
+    address: networkConfig.transfer_addr, // rune receiver address
     value: 546,
   });
 
+  // add btc utxo input
   let totalBtcAmount = 0;
   for (const btcutxo of btcUtxos) {
     const fee = calculateTxFee(psbt, feeRate);
@@ -406,33 +395,85 @@ async function pre_transfer(runeID: string, amount: number) {
 
   if (totalBtcAmount < fee) throw "BTC balance is not enough";
 
-  // psbt.addInput({
-  //   hash: btcUTXO.txid,
-  //   index: btcUTXO.vout,
-  //   witnessUtxo: { value: btcUTXO.value, script: p2pktr.output! },
-  //   tapInternalKey: toXOnly(keyPair.publicKey),
-  // });
-
   psbt.addOutput({
-    address: networkConfig.seller_addr,
+    address: networkConfig.payment_addr,
     value: totalBtcAmount - fee
   });
 
   await signAndSend(tweakedSigner, psbt, address as string);
 }
 
+
 async function burn_token(runeID: string, amount: number) {
+
+  const btcUtxos = await getBtcUtxoByAddress(networkConfig.payment_addr);
+
+  console.log("BTCUtxos ==>", btcUtxos);
+
+  const runeUtxos = await getRuneUtxoByAddress(networkConfig.transfer_addr, runeID);
+
+  if (runeUtxos.tokenSum < networkConfig.claim_amount) {
+    throw "Invalid amount"
+  }
+
+  console.log("runeUtxos ======>", runeUtxos.runeUtxos);
+
+  const feeRate = await getFeeRate();
 
   const runeBlockNumber = parseInt(runeID.split(":")[0]);
   const runeTxout = parseInt(runeID.split(":")[1]);
 
   const keyPair = wallet.ecPair;
+
+  const tweakedSigner = tweakSigner(keyPair, { network });
+
+  // Generate an address from the tweaked public key
+  const p2pktr = payments.p2tr({
+    pubkey: toXOnly(tweakedSigner.publicKey),
+    network,
+  });
+  const address = p2pktr.address ?? "";
+
+  console.log(`Waiting till UTXO is detected at this Address: ${address}`);
+
+  const psbt = new Psbt({ network });
+
   const edicts: any = [];
+
+  let tokenSum = 0;
+  let cnt = 2;
+
+  // create rune utxo input && edict
+  for (const runeutxo of runeUtxos.runeUtxos) {
+
+    psbt.addInput({
+      hash: runeutxo.txid,
+      index: runeutxo.vout,
+      tapInternalKey: toXOnly(keyPair.publicKey),
+      witnessUtxo: {
+        value: runeutxo.value,
+        script: p2pktr.output!
+      },
+    });
+
+    edicts.push({
+      id: new RuneId(runeBlockNumber, runeTxout),
+      amount: runeutxo.amount,
+      output: cnt,
+    })
+    tokenSum += runeutxo.amount;
+
+    if (tokenSum > networkConfig.claim_amount) {
+      return edicts
+    }
+  }
+
   edicts.push({
     id: new RuneId(runeBlockNumber, runeTxout),
-    amount,
-    output: 50,
+    amount: tokenSum - networkConfig.claim_amount,
+    output: 1,
   });
+
   const mintstone = new Runestone(
     edicts,
     none(),
@@ -440,69 +481,65 @@ async function burn_token(runeID: string, amount: number) {
     none()
   );
 
-  const tweakedSigner = tweakSigner(keyPair, { network });
-  // Generate an address from the tweaked public key
-  const p2pktr = payments.p2tr({
-    pubkey: toXOnly(tweakedSigner.publicKey),
-    network,
-  });
-  const address = p2pktr.address ?? "";
-  console.log(`Waiting till UTXO is detected at this Address: ${address}`);
-
-  // https://open-api-testnet.unisat.io/v1/indexer/address/tb1pcngsk49thk8e5m2ndfqv9sycltrjr4rx0prwhwr22mujl99y6szqw2kv0f/runes/2587772:289/utxo
-
-  const runeUTXO = {
-    txid: '6f82a1d12b3bc236bf4fe269a4571161f1893c106536726f1ed5bb28f4d853a9',
-    vout: 2,
-    value: 546
-  };
-
-  // https://open-api.unisat.io/v1/indexer/address/tb1pcngsk49thk8e5m2ndfqv9sycltrjr4rx0prwhwr22mujl99y6szqw2kv0f/utxo-data
-
-  const btcUTXO = {
-    txid: '6f82a1d12b3bc236bf4fe269a4571161f1893c106536726f1ed5bb28f4d853a9',
-    vout: 3,
-    value: 5577195,
-  }
-
-  const psbt = new Psbt({ network });
-  psbt.addInput({
-    hash: runeUTXO.txid,
-    index: runeUTXO.vout,
-    witnessUtxo: { value: runeUTXO.value, script: p2pktr.output! },
-    tapInternalKey: toXOnly(keyPair.publicKey),
-  });
-
-  psbt.addInput({
-    hash: btcUTXO.txid,
-    index: btcUTXO.vout,
-    witnessUtxo: { value: btcUTXO.value, script: p2pktr.output! },
-    tapInternalKey: toXOnly(keyPair.publicKey),
-  });
-
   psbt.addOutput({
     script: mintstone.encipher(),
     value: 0,
   });
 
   psbt.addOutput({
-    address: networkConfig.seller_addr, // rune receive address
+    address: networkConfig.transfer_addr, // rune sender address
     value: 546,
   });
 
-  const fee = 100000;
+  // add rune receiver address
+  psbt.addOutput({
+    address: networkConfig.burning_addr, // rune burning address
+    value: 546,
+  });
 
-  const change = btcUTXO.value - fee - 546;
+  // add btc utxo input
+  let totalBtcAmount = 0;
+  for (const btcutxo of btcUtxos) {
+    const fee = calculateTxFee(psbt, feeRate);
+    if (
+      totalBtcAmount < fee &&
+      btcutxo.value > 10000
+    ) {
+      totalBtcAmount += btcutxo.value;
+      psbt.addInput({
+        hash: btcutxo.txid,
+        index: btcutxo.vout,
+        tapInternalKey: toXOnly(keyPair.publicKey),
+        witnessUtxo: {
+          script: Buffer.from(btcutxo.scriptpubkey as string, "hex"),
+          value: btcutxo.value,
+        },
+      });
+    }
+  }
+
+  const fee = calculateTxFee(psbt, feeRate);
+
+  console.log("Pay Fee =>", fee);
+
+  if (totalBtcAmount < fee) throw "BTC balance is not enough";
 
   psbt.addOutput({
-    address: networkConfig.destination_addr, // change address
-    value: change,
+    address: networkConfig.payment_addr,
+    value: totalBtcAmount - fee
   });
 
   await signAndSend(tweakedSigner, psbt, address as string);
 }
 
-// main
-// burn_token(networkConfig.runeId, networkConfig.claim_amount);
-pre_transfer(networkConfig.runeId, networkConfig.claim_amount);
 
+
+// main
+const index = async () => {
+
+  await pre_transfer(networkConfig.runeId, networkConfig.claim_amount);
+  await burn_token(networkConfig.runeId, networkConfig.claim_amount);
+
+}
+
+index();
