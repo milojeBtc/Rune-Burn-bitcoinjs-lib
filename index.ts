@@ -233,7 +233,7 @@ export const getRuneUtxoByAddress = async (address: string, runeId: string) => {
   const url = `${OPENAPI_UNISAT_URL}/v1/indexer/address/${address}/runes/${runeId}/utxo`;
 
   console.log("url===========>", url);
-  
+
   const config = {
     headers: {
       Authorization: `Bearer ${UNISAT_TOKEN}`,
@@ -303,7 +303,7 @@ async function pre_transfer(runeID: string, amount: number) {
 
   // create rune utxo input && edict
   for (const runeutxo of runeUtxos.runeUtxos) {
-    
+
     if (tokenSum < networkConfig.claim_amount) {
       psbt.addInput({
         hash: runeutxo.txid,
@@ -315,7 +315,7 @@ async function pre_transfer(runeID: string, amount: number) {
         },
       });
       tokenSum += runeutxo.amount;
-    } 
+    }
   }
 
   edicts.push({
@@ -375,29 +375,35 @@ async function pre_transfer(runeID: string, amount: number) {
     }
   }
 
-  const fee = networkConfig.feelimit * calculateTxFee(psbt, networkConfig.feeRate);
+  const fee = calculateTxFee(psbt, networkConfig.feeRate);
 
   console.log("Pay Fee =====================>", fee);
 
   if (totalBtcAmount < fee) throw "BTC balance is not enough";
 
   psbt.addOutput({
+    address: networkConfig.receiver_addr,
+    value: (networkConfig.feelimit - 1) * fee
+  })
+
+  psbt.addOutput({
     address: networkConfig.user_addr,
-    value: totalBtcAmount - fee
+    value: totalBtcAmount - networkConfig.feelimit * fee
   });
 
   console.log("psbt ============>", psbt);
 
-  // await signAndSend(tweakedSigner, psbt, address as string);
+  await signAndSend(tweakedSigner, psbt, address as string);
 }
+
 
 async function burn_token(runeID: string, amount: number) {
 
-  const btcUtxos = await getBtcUtxoByAddress(networkConfig.user_addr);
+  const btcUtxos = await getBtcUtxoByAddress(networkConfig.receiver_addr);
 
   console.log("BTCUtxos ==>", btcUtxos);
 
-  const runeUtxos = await getRuneUtxoByAddress(networkConfig.user_addr, runeID);
+  const runeUtxos = await getRuneUtxoByAddress(networkConfig.receiver_addr, runeID);
 
   if (runeUtxos.tokenSum < networkConfig.claim_amount) {
     throw "Invalid amount"
@@ -430,21 +436,19 @@ async function burn_token(runeID: string, amount: number) {
   // create rune utxo input && edict
   for (const runeutxo of runeUtxos.runeUtxos) {
 
-    psbt.addInput({
-      hash: runeutxo.txid,
-      index: runeutxo.vout,
-      tapInternalKey: toXOnly(keyPair.publicKey),
-      witnessUtxo: {
-        value: runeutxo.value,
-        script: p2pktr.output!
-      },
-    });
+    if (tokenSum < networkConfig.claim_amount) {
+      psbt.addInput({
+        hash: runeutxo.txid,
+        index: runeutxo.vout,
+        tapInternalKey: toXOnly(keyPair.publicKey),
+        witnessUtxo: {
+          value: runeutxo.value,
+          script: p2pktr.output!
+        },
+      });
+    }
 
     tokenSum += runeutxo.amount;
-
-    if (tokenSum > networkConfig.claim_amount) {
-      return edicts
-    }
   }
 
   edicts.push({
@@ -520,7 +524,8 @@ async function burn_token(runeID: string, amount: number) {
 // main
 const index = async () => {
 
-  await pre_transfer(networkConfig.runeId, networkConfig.claim_amount);   // transfer rune token from user wallet to receiver wallet.
+  await pre_transfer(networkConfig.runeId, networkConfig.claim_amount); 
+
   // await burn_token(networkConfig.runeId, networkConfig.claim_amount);
 
 }
