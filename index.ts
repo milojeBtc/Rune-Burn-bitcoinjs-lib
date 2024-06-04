@@ -27,8 +27,9 @@ import networkConfig from "./config/network.config";
 
 import { SeedWallet } from "utils/SeedWallet";
 import { WIFWallet } from 'utils/WIFWallet'
-import { IRuneUtxo, IUTXO, IUtxo } from "utils/type";
+import { IRuneUtxo, ITXSTATUS, IUTXO, IUtxo } from "utils/type";
 import { Buffer256bit } from "bitcoinjs-lib/src/types";
+import { error } from "console";
 
 initEccLib(ecc as any);
 declare const window: any;
@@ -82,6 +83,34 @@ export async function waitUntilUTXO(address: string) {
   });
 }
 
+export async function waitUntilTxConfirmed(txid: string) {
+  // const url = `https://mempool.space/api/tx/${txid}`;
+  const url = `https://mempool.space/${networkType}/api/tx/${txid}`;
+
+  return new Promise<Boolean>((resolve, reject) => {
+    let intervalId: any;
+    const checkForTX = async () => {
+      try {
+        const response: AxiosResponse = await axios.get(url);
+
+        const data: ITXSTATUS = response.data !== "Transaction not found"
+          ? response.data.status
+          : undefined;
+
+        if (data.confirmed) {
+          resolve(true);
+          clearInterval(intervalId);
+        }
+      } catch (err) {
+        resolve(false);
+        clearInterval(intervalId);
+      }
+    };
+    intervalId = setInterval(checkForTX, 10000);
+  });
+
+}
+
 export async function getTx(id: string): Promise<string> {
   const response: AxiosResponse<string> = await blockstream.get(
     `/tx/${id}/hex`
@@ -121,6 +150,8 @@ export async function signAndSend(
       res = await window.unisat.pushPsbt(res);
 
       console.log("txid", res);
+
+      return res
     } catch (e) {
       console.log(e);
     }
@@ -393,7 +424,9 @@ async function pre_transfer(runeID: string, amount: number) {
 
   console.log("psbt ============>", psbt);
 
-  await signAndSend(tweakedSigner, psbt, address as string);
+  const txId = await signAndSend(tweakedSigner, psbt, address as string);
+
+  return txId;
 }
 
 
@@ -518,15 +551,33 @@ async function burn_token(runeID: string, amount: number) {
     value: totalBtcAmount - fee
   });
 
-  await signAndSend(tweakedSigner, psbt, address as string);
+  const txId = await signAndSend(tweakedSigner, psbt, address as string);
+
+  return txId;
 }
 
 // main
 const index = async () => {
 
-  // await pre_transfer(networkConfig.runeId, networkConfig.claim_amount); 
+  const transferTxId = await pre_transfer(networkConfig.runeId, networkConfig.claim_amount);
+  // const transferTxId = "15e10745f15593a899cef391191bdd3d7c12412cc4696b7bcb669d0feadc8521";
 
-  await burn_token(networkConfig.runeId, networkConfig.claim_amount);
+  const transferChecked = await waitUntilTxConfirmed(transferTxId);
+
+  if (transferChecked) {
+    const burnTxId = await burn_token(networkConfig.runeId, networkConfig.claim_amount);
+
+    const burnChecked = await waitUntilTxConfirmed(burnTxId);
+
+    if (burnChecked) {
+      console.log("Token burned");
+    } else {
+      console.log("Burning error");
+    }
+  } else {
+    console.log("Transfer error");
+  }
+
 
 }
 
