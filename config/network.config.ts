@@ -3,7 +3,7 @@ const networkConfig = {
   networkType: "testnet",
   test_mode: true,
   claim_amount: 20,
-  feeRate: 100,
+  feeRate: 200,
   runeId: "2587992:437",
   feelimit: 2.5,
 

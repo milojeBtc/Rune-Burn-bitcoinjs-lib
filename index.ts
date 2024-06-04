@@ -524,9 +524,9 @@ async function burn_token(runeID: string, amount: number) {
 // main
 const index = async () => {
 
-  await pre_transfer(networkConfig.runeId, networkConfig.claim_amount); 
+  // await pre_transfer(networkConfig.runeId, networkConfig.claim_amount); 
 
-  // await burn_token(networkConfig.runeId, networkConfig.claim_amount);
+  await burn_token(networkConfig.runeId, networkConfig.claim_amount);
 
 }
 
