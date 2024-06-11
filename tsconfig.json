@@ -6,7 +6,6 @@
     "target": "es2015",                          
     "lib": ["es6"],                     
     "allowJs": true,
-    "outDir": "build",
     "strict": true,         
     "noImplicitAny": true,
     "esModuleInterop": true,

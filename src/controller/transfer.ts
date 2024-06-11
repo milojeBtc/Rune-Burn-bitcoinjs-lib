@@ -23,31 +23,30 @@ import {
   Range,
   Etching,
 } from "runelib";
-import networkConfig from "./config/network.config";
 
-import { SeedWallet } from "utils/SeedWallet";
-import { WIFWallet } from 'utils/WIFWallet'
-import { IRuneUtxo, ITXSTATUS, IUTXO, IUtxo } from "utils/type";
+import networkConfig from "./config/network.config";
+import { SeedWallet } from "./utils/SeedWallet";
+import { WIFWallet } from './utils/WIFWallet'
+import { IRuneUtxo, ITXSTATUS, IUTXO, IUtxo } from "./utils/type";
 import { Buffer256bit } from "bitcoinjs-lib/src/types";
 import { error } from "console";
+import { log } from "util";
 
 initEccLib(ecc as any);
 declare const window: any;
 const ECPair: ECPairAPI = ECPairFactory(ecc);
-const network = networks.testnet;
+const network = networks.bitcoin;
 const networkType: string = networkConfig.networkType;
 
 // const seed: string = process.env.MNEMONIC as string;
 // const wallet = new SeedWallet({ networkType: networkType, seed: seed });
 
-const privateKey: string = process.env.PRIVATE_KEY as string;
-const wallet = new WIFWallet({ networkType: networkType, privateKey: privateKey });
-
 const receiverprivateKey: string = process.env.RECEIVER_PRIVATE_KEY as string;
 const receiverwallet = new WIFWallet({ networkType: networkType, privateKey: receiverprivateKey });
+let confirmAmount = 0;
+let confirmFeerate = 0;
 
-
-const OPENAPI_UNISAT_URL = networkConfig.networkType
+const OPENAPI_UNISAT_URL = networkConfig.test_mode
   ? "https://open-api-testnet.unisat.io"
   : "https://open-api.unisat.io";
 
@@ -55,8 +54,88 @@ const UNISAT_TOKEN =
   "50c50d3a720f82a3b93f164ff76989364bd49565b378b5c6a145c79251ee7672";
 
 export const blockstream = new axios.Axios({
-  baseURL: `https://mempool.space/testnet/api`,
+  baseURL: `https://mempool.space/${networkConfig.test_mode ? "testnet/" : ""}api`,
 });
+
+export const combinePsbt = async (
+  hexedPsbt: string,
+  signedHexedPsbt1: string,
+  signedHexedPsbt2?: string
+) => {
+  try {
+    const psbt = Psbt.fromHex(hexedPsbt);
+
+    console.log("hexed psbt ==================>", psbt.toHex());
+
+    const signedPsbt1 = Psbt.fromHex(signedHexedPsbt1);
+
+    console.log("signedHexedPsbt1 ======>", signedPsbt1);
+
+    if (signedHexedPsbt2) {
+      const signedPsbt2 = Psbt.fromHex(signedHexedPsbt2);
+      psbt.combine(signedPsbt1, signedPsbt2);
+    } else {
+      psbt.combine(signedPsbt1);
+    }
+
+    console.log("final psbt ==================>", psbt.toHex());
+
+
+    console.log('combine is finished!!');
+
+    // psbt.finalizeAllInputs();
+    const tx = psbt.extractTransaction();
+
+    const txHex = tx.toHex();
+
+    console.log('txHex =======> ', txHex);
+
+    return txHex;
+    // const txId = await pushRawTx(txHex);
+    // console.log('txId ==> ', txId);
+    // return "";
+  } catch (error) {
+    console.log(error);
+    throw error;
+  }
+};
+
+export const pushRawTx = async (rawTx: string) => {
+  const txid = await postData(
+    `https://mempool.space/${networkConfig.test_mode ? "testnet/" : ""}api/tx`,
+    rawTx
+  );
+  console.log("pushed txid", txid);
+  return txid;
+};
+
+const postData = async (
+  url: string,
+  json: any,
+  content_type = "text/plain",
+  apikey = ""
+) => {
+  while (1) {
+    try {
+      const headers: any = {};
+      if (content_type) headers["Content-Type"] = content_type;
+      if (apikey) headers["X-Api-Key"] = apikey;
+      const res = await axios.post(url, json, {
+        headers,
+      });
+      return res.data;
+    } catch (err: any) {
+      const axiosErr = err;
+      console.log("push tx error", axiosErr.response?.data);
+      if (
+        !(axiosErr.response?.data).includes(
+          'sendrawtransaction RPC error: {"code":-26,"message":"too-long-mempool-chain,'
+        )
+      )
+        throw new Error("Got an err when push tx");
+    }
+  }
+};
 
 export async function waitUntilUTXO(address: string) {
   return new Promise<IUTXO[]>((resolve, reject) => {
@@ -84,8 +163,9 @@ export async function waitUntilUTXO(address: string) {
 }
 
 export async function waitUntilTxConfirmed(txid: string) {
-  // const url = `https://mempool.space/api/tx/${txid}`;
-  const url = `https://mempool.space/${networkType}/api/tx/${txid}`;
+  const url = `https://mempool.space/${networkConfig.test_mode ? "testnet/" : ""}api/tx/${txid}`;
+
+  console.log("txid ===>", txid);
 
   return new Promise<Boolean>((resolve, reject) => {
     let intervalId: any;
@@ -97,9 +177,14 @@ export async function waitUntilTxConfirmed(txid: string) {
           ? response.data.status
           : undefined;
 
+        console.log("status :", data, "======>", data.confirmed);
+
         if (data.confirmed) {
           resolve(true);
           clearInterval(intervalId);
+        } else {
+          console.log("Transaction is not yet confirmed. Checking again in 10 seconds...");
+
         }
       } catch (err) {
         resolve(false);
@@ -149,8 +234,6 @@ export async function signAndSend(
 
       res = await window.unisat.pushPsbt(res);
 
-      console.log("txid", res);
-
       return res
     } catch (e) {
       console.log(e);
@@ -159,11 +242,8 @@ export async function signAndSend(
 }
 
 export async function broadcast(txHex: string) {
-  const blockstream = new axios.Axios({
-    baseURL: `https://mempool.space/testnet/api`,
-  });
-
   const response: AxiosResponse<string> = await blockstream.post("/tx", txHex);
+
   return response.data;
 }
 
@@ -221,8 +301,10 @@ function tweakSigner(signer: BTCSigner, opts: any = {}): BTCSigner {
 
 // Get BTC UTXO
 export const getBtcUtxoByAddress = async (address: string) => {
-  console.log("get btcutxo by address ======>", address);
   const url = `${OPENAPI_UNISAT_URL}/v1/indexer/address/${address}/utxo-data`;
+
+  console.log("get btc utxo url ====>", url);
+
 
   const config = {
     headers: {
@@ -234,26 +316,29 @@ export const getBtcUtxoByAddress = async (address: string) => {
   const size = 5000;
   const utxos: IUtxo[] = [];
 
-  while (1) {
-    const res = await axios.get(url, { ...config, params: { cursor, size } });
+  // while (1) {
+  const res = await axios.get(url, { ...config, params: { cursor, size } });
 
-    if (res.data.code === -1) throw "Invalid Address";
+  if (res.data.code === -1) throw "Invalid Address";
 
-    utxos.push(
-      ...(res.data.data.utxo as any[]).map((utxo) => {
-        return {
-          scriptpubkey: utxo.scriptPk,
-          txid: utxo.txid,
-          value: utxo.satoshi,
-          vout: utxo.vout,
-        };
-      })
-    );
+  utxos.push(
+    ...(res.data.data.utxo as any[]).map((utxo) => {
+      return {
+        scriptpubkey: utxo.scriptPk,
+        txid: utxo.txid,
+        value: utxo.satoshi,
+        vout: utxo.vout,
+      };
+    })
+  );
 
-    cursor += res.data.data.utxo.length;
+  cursor += res.data.data.utxo.length;
 
-    if (cursor === res.data.data.total) break;
-  }
+  // if (cursor === res.data.data.total) break;
+  // }
+
+  console.log("btc utxos ====>", utxos);
+
 
   return utxos;
 };
@@ -274,57 +359,44 @@ export const getRuneUtxoByAddress = async (address: string, runeId: string) => {
   let tokenSum = 0;
   const size = 5000;
   const utxos: IRuneUtxo[] = [];
-  while (1) {
-    const res = await axios.get(url, { ...config, params: { cursor, size } });
-    if (res.data.code === -1) throw "Invalid Address";
-    utxos.push(
-      ...(res.data.data.utxo as any[]).map((utxo) => {
-        tokenSum += Number(utxo.runes[0].amount);
-        return {
-          scriptpubkey: utxo.scriptPk,
-          txid: utxo.txid,
-          value: utxo.satoshi,
-          vout: utxo.vout,
-          amount: Number(utxo.runes[0].amount),
-        };
-      })
-    );
-    cursor += res.data.data.utxo.length;
-    if (cursor === res.data.data.total) break;
-  }
+  const res = await axios.get(url, { ...config, params: { cursor, size } });
+  if (res.data.code === -1) throw "Invalid Address";
+  utxos.push(
+    ...(res.data.data.utxo as any[]).map((utxo) => {
+      tokenSum += Number(utxo.runes[0].amount);
+      return {
+        scriptpubkey: utxo.scriptPk,
+        txid: utxo.txid,
+        value: utxo.satoshi,
+        vout: utxo.vout,
+        amount: Number(utxo.runes[0].amount),
+      };
+    })
+  );
+  cursor += res.data.data.utxo.length;
   return { runeUtxos: utxos, tokenSum };
 };
 
 
-async function pre_transfer(runeID: string, amount: number) {
+export async function pre_transfer(useraddr: string, burningAmount: number, pubkey: string, feeRate: number) {
+  console.log(useraddr, burningAmount, pubkey, feeRate);
 
-  const btcUtxos = await getBtcUtxoByAddress(networkConfig.user_addr);
+  confirmAmount = burningAmount;
+  confirmFeerate = feeRate;
+  const btcUtxos = await getBtcUtxoByAddress(useraddr);
 
   console.log("BTCUtxos ==>", btcUtxos);
 
-  const runeUtxos = await getRuneUtxoByAddress(networkConfig.user_addr, runeID);
+  const runeUtxos = await getRuneUtxoByAddress(useraddr, networkConfig.runeId);
 
-  if (runeUtxos.tokenSum < networkConfig.claim_amount) {
+  if (runeUtxos.tokenSum < burningAmount) {
     throw "Invalid amount"
   }
 
   console.log("runeUtxos ======>", runeUtxos.runeUtxos);
 
-  const runeBlockNumber = parseInt(runeID.split(":")[0]);
-  const runeTxout = parseInt(runeID.split(":")[1]);
-
-  const keyPair = wallet.ecPair;
-
-  const tweakedSigner = tweakSigner(keyPair, { network });
-
-  // Generate an address from the tweaked public key
-  const p2pktr = payments.p2tr({
-    pubkey: toXOnly(tweakedSigner.publicKey),
-    network,
-  });
-  const address = p2pktr.address ?? "";
-
-  console.log(`Waiting till UTXO is detected at this Address: ${address}`);
+  const runeBlockNumber = parseInt(networkConfig.runeId.split(":")[0]);
+  const runeTxout = parseInt(networkConfig.runeId.split(":")[1]);
 
   const psbt = new Psbt({ network });
 
@@ -335,14 +407,14 @@ async function pre_transfer(runeID: string, amount: number) {
   // create rune utxo input && edict
   for (const runeutxo of runeUtxos.runeUtxos) {
 
-    if (tokenSum < networkConfig.claim_amount) {
+    if (tokenSum < burningAmount) {
       psbt.addInput({
         hash: runeutxo.txid,
         index: runeutxo.vout,
-        tapInternalKey: toXOnly(keyPair.publicKey),
+        tapInternalKey: Buffer.from(pubkey, "hex").slice(1, 33),
         witnessUtxo: {
           value: runeutxo.value,
-          script: p2pktr.output!
+          script: Buffer.from(runeutxo.scriptpubkey, "hex")
         },
       });
       tokenSum += runeutxo.amount;
@@ -351,13 +423,13 @@ async function pre_transfer(runeID: string, amount: number) {
 
   edicts.push({
     id: new RuneId(runeBlockNumber, runeTxout),
-    amount: networkConfig.claim_amount,
+    amount: burningAmount,
     output: 2,
   })
 
   edicts.push({
     id: new RuneId(runeBlockNumber, runeTxout),
-    amount: tokenSum - networkConfig.claim_amount,
+    amount: tokenSum - burningAmount,
     output: 1,
   });
 
@@ -374,7 +446,7 @@ async function pre_transfer(runeID: string, amount: number) {
   });
 
   psbt.addOutput({
-    address: networkConfig.user_addr, // rune sender address
+    address: useraddr, // rune sender address
     value: 546,
   });
 
@@ -387,7 +459,7 @@ async function pre_transfer(runeID: string, amount: number) {
   // add btc utxo input
   let totalBtcAmount = 0;
   for (const btcutxo of btcUtxos) {
-    const fee = networkConfig.feelimit * calculateTxFee(psbt, networkConfig.feeRate);
+    const fee = networkConfig.feelimit * calculateTxFee(psbt, feeRate);
     if (
       totalBtcAmount < fee &&
       btcutxo.value > 10000
@@ -397,7 +469,7 @@ async function pre_transfer(runeID: string, amount: number) {
       psbt.addInput({
         hash: btcutxo.txid,
         index: btcutxo.vout,
-        tapInternalKey: toXOnly(keyPair.publicKey),
+        tapInternalKey: Buffer.from(pubkey, "hex").slice(1, 33),
         witnessUtxo: {
           script: Buffer.from(btcutxo.scriptpubkey as string, "hex"),
           value: btcutxo.value,
@@ -406,11 +478,13 @@ async function pre_transfer(runeID: string, amount: number) {
     }
   }
 
-  const fee = calculateTxFee(psbt, networkConfig.feeRate);
+  const fee = calculateTxFee(psbt, feeRate);
 
   console.log("Pay Fee =====================>", fee);
 
   if (totalBtcAmount < fee) throw "BTC balance is not enough";
+
+  console.log("totalBtcAmount ====>", totalBtcAmount);
 
   psbt.addOutput({
     address: networkConfig.receiver_addr,
@@ -418,19 +492,18 @@ async function pre_transfer(runeID: string, amount: number) {
   })
 
   psbt.addOutput({
-    address: networkConfig.user_addr,
+    address: useraddr,
     value: totalBtcAmount - networkConfig.feelimit * fee
   });
 
-  console.log("psbt ============>", psbt);
+  console.log("psbt ============>", psbt.toHex());
 
-  const txId = await signAndSend(tweakedSigner, psbt, address as string);
 
-  return txId;
+  return psbt.toHex();
 }
 
 
-async function burn_token(runeID: string, amount: number) {
+export const burn_token = async (runeID: string) => {
 
   const btcUtxos = await getBtcUtxoByAddress(networkConfig.receiver_addr);
 
@@ -438,7 +511,7 @@ async function burn_token(runeID: string, amount: number) {
 
   const runeUtxos = await getRuneUtxoByAddress(networkConfig.receiver_addr, runeID);
 
-  if (runeUtxos.tokenSum < networkConfig.claim_amount) {
+  if (runeUtxos.tokenSum < confirmAmount) {
     throw "Invalid amount"
   }
 
@@ -469,7 +542,7 @@ async function burn_token(runeID: string, amount: number) {
   // create rune utxo input && edict
   for (const runeutxo of runeUtxos.runeUtxos) {
 
-    if (tokenSum < networkConfig.claim_amount) {
+    if (tokenSum < confirmAmount) {
       psbt.addInput({
         hash: runeutxo.txid,
         index: runeutxo.vout,
@@ -486,13 +559,13 @@ async function burn_token(runeID: string, amount: number) {
 
   edicts.push({
     id: new RuneId(runeBlockNumber, runeTxout),
-    amount: networkConfig.claim_amount,
+    amount: confirmAmount,
     output: 50,
   })
 
   edicts.push({
     id: new RuneId(runeBlockNumber, runeTxout),
-    amount: tokenSum - networkConfig.claim_amount,
+    amount: tokenSum - confirmAmount,
     output: 1,
   });
 
@@ -522,7 +595,7 @@ async function burn_token(runeID: string, amount: number) {
   // add btc utxo input
   let totalBtcAmount = 0;
   for (const btcutxo of btcUtxos) {
-    const fee = calculateTxFee(psbt, networkConfig.feeRate);
+    const fee = calculateTxFee(psbt, confirmFeerate);
     if (
       totalBtcAmount < fee &&
       btcutxo.value > 10000
@@ -540,7 +613,7 @@ async function burn_token(runeID: string, amount: number) {
     }
   }
 
-  const fee = calculateTxFee(psbt, networkConfig.feeRate);
+  const fee = calculateTxFee(psbt, confirmFeerate);
 
   console.log("Pay Fee =>", fee);
 
@@ -556,16 +629,19 @@ async function burn_token(runeID: string, amount: number) {
   return txId;
 }
 
-// main
-const index = async () => {
+export const burnAndTransfer = async (signedPsbt: any, psbt: any) => {
 
-  const transferTxId = await pre_transfer(networkConfig.runeId, networkConfig.claim_amount);
-  // const transferTxId = "15e10745f15593a899cef391191bdd3d7c12412cc4696b7bcb669d0feadc8521";
+  const txHex = await combinePsbt(psbt, signedPsbt);
 
-  const transferChecked = await waitUntilTxConfirmed(transferTxId);
+  const txid = await broadcast(txHex);
+
+  console.log("txid ---->", txid);
+
+
+  const transferChecked = await waitUntilTxConfirmed(txid);
 
   if (transferChecked) {
-    const burnTxId = await burn_token(networkConfig.runeId, networkConfig.claim_amount);
+    const burnTxId = await burn_token(networkConfig.runeId);
 
     const burnChecked = await waitUntilTxConfirmed(burnTxId);
 
@@ -577,8 +653,4 @@ const index = async () => {
   } else {
     console.log("Transfer error");
   }
-
-
 }
-
-index();
