@@ -1,3 +1,5 @@
+The Rune Burn Project.
+
 1. Transfer claim amount of rune token from User wallet to Receiver wallet. 
 
     - Get rune utxos and btc utxos in user wallet.
